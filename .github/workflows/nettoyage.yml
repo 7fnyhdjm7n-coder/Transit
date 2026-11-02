@@ -1,0 +1,57 @@
+# Nettoyage automatique des vidéos de transit (projet « Vidéos »)
+# Chaque vidéo est déposée sur une branche « v-<aléatoire> », le temps que Metricool en fasse sa copie.
+# 1. Quand la production pousse sur cette branche un commit « fini », la branche est supprimée aussitôt.
+# 2. Filet de sécurité : toute branche « v-* » est supprimée au plus tard 10 minutes après son dépôt,
+#    même si le commit « fini » n'arrive jamais.
+# 3. Toutes les 15 minutes (et à la demande), toute branche autre que la principale qui a plus de
+#    15 minutes est supprimée.
+name: Nettoyage des vidéos
+
+on:
+  push:
+    branches: ["v-*"]
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nettoyage-${{ github.ref_name }}
+  cancel-in-progress: true
+
+jobs:
+  supprimer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Supprimer la branche de la vidéo
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MESSAGE: ${{ github.event.head_commit.message }}
+        run: |
+          if [ "$MESSAGE" != "fini" ]; then
+            echo "Dépôt de la vidéo : suppression de secours dans 10 minutes."
+            sleep 600
+          fi
+          gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/${{ github.ref_name }}" \
+            && echo "Branche ${{ github.ref_name }} supprimée." \
+            || echo "Branche déjà supprimée."
+
+      - name: Supprimer les branches oubliées
+        if: github.event_name != 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          principale="${{ github.event.repository.default_branch }}"
+          limite=$(date -u -d '15 minutes ago' +%s)
+          gh api "repos/${{ github.repository }}/branches" --paginate --jq '.[] | "\(.name) \(.commit.sha)"' |
+          while read -r nom sha; do
+            [ "$nom" = "$principale" ] && continue
+            quand=$(gh api "repos/${{ github.repository }}/commits/$sha" --jq '.commit.committer.date')
+            if [ "$(date -u -d "$quand" +%s)" -lt "$limite" ]; then
+              gh api -X DELETE "repos/${{ github.repository }}/git/refs/heads/$nom" && echo "Supprimée : $nom"
+            fi
+          done
